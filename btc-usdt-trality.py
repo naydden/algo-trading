@@ -19,12 +19,6 @@ def initialize(state):
 
 	state.max_all_time = 19660
 
-	state.position_active = False
-	state.position_buy_price = 0
-	state.position_top_price = 0
-	state.position_stop_loss = 0
-	state.position_crossover = True
-
 	state.levels = [
 		{
 			'type' : 'r',
@@ -68,22 +62,23 @@ def initialize(state):
 		}
 	]
 
-def buy(amount, percent, last_price):
-	order_market_amount(symbol="BTCUSDT", amount = amount)
+def last_five_up(data):
+	prices = data.select("close")
+	signs = np.sign(np.diff(prices))[-5:]
+	return sum(signs) == 5
+
+def order_with_sl(amount,percent, last_price, trend):
+	with OrderScope.sequential(fail_on_error=True, wait_for_entire_fill=False):
+		order_1 = order_market_amount(symbol="BTCUSDT", amount = amount)
+		order_2 = order_stop_loss(symbol="BTCUSDT", amount = amount, stop_percent=percent)
+		# order_2 = order_trailing_iftouched_amount(symbol="BTCUSDT", amount = -amount,\
+		#		 trailing_percent = float(percent), stop_price=float(last_price*(1-percent)))
 
 	print("-------")
 	print("Buy Signal: creating market order for {}".format("BTCUSDT"))
 	print("Buy amount: ", amount, " at current market price: ", last_price)
-	print("-------")
-
-def close_and_log(position, data, trend):
-	print("-------")
-	logmsg = "Sell Signal: closing {} position with exposure {} at current market price {}"
-	print(logmsg.format(data.symbol,float(position.exposure),data.close_last))
 	print("Trend: ", trend)
 	print("-------")
-
-	close_position(data.symbol)
 
 def check_levels_buy(close_prices, current_price, state):
 
@@ -97,29 +92,17 @@ def check_levels_buy(close_prices, current_price, state):
 		if current_price / state.levels[0]['level'] > 1.02 and np.any(case0):
 
 			stop_loss = current_price/state.levels[0]['level']*0.98 - 1
-			buy(state.position_amount, stop_loss, current_price)
-			state.position_active = True
-			state.position_buy_price = current_price
-			state.position_top_price = current_price
-			state.position_stop_loss = stop_loss
+			order_with_sl(state.position_amount, stop_loss, current_price, state.trend )
 
 		elif current_price / state.levels[2]['level'] > 1.02 and np.any(case2):
 
 			stop_loss = current_price/state.levels[2]['level']*0.98 - 1
-			buy(state.position_amount, stop_loss, current_price)
-			state.position_active = True
-			state.position_buy_price = current_price
-			state.position_top_price = current_price
-			state.position_stop_loss = stop_loss
+			order_with_sl(state.position_amount, stop_loss, current_price, state.trend )
 
 		elif current_price / state.levels[3]['level'] > 1.02 and np.any(case3):
 
 			stop_loss = current_price/state.levels[3]['level']*0.98 - 1
-			buy(state.position_amount, stop_loss, current_price)
-			state.position_active = True
-			state.position_buy_price = current_price
-			state.position_top_price = current_price
-			state.position_stop_loss = stop_loss
+			order_with_sl(state.position_amount, stop_loss, current_price, state.trend )
 
 def check_levels_close(close_prices, position, data, state):
 
@@ -142,10 +125,20 @@ def check_levels_close(close_prices, position, data, state):
 			close_and_log(position, data, state.trend )
 
 
+def close_and_log(position, data, trend):
+	print("-------")
+	logmsg = "Sell Signal: closing {} position with exposure {} at current market price {}"
+	print(logmsg.format(data.symbol,float(position.exposure),data.close_last))
+	print("Trend: ", trend)
+	print("-------")
+
+	close_position(data.symbol)
+
+
 @schedule(interval= "1d", symbol="BTCUSDT")
 def handler_long(state, data):
-	ema_long = data.ema(32).last
-	ema_short = data.ema(16).last
+	ema_long = data.ema(40).last
+	ema_short = data.ema(15).last
 	adx = data.adx(14).last
 	dm = data.dm(period=14)
 
@@ -171,10 +164,13 @@ def handler(state, data):
 
 	ema_long = data.ema(35).last
 	ema_short = data.ema(14).last
+	bbands = data.bbands(period=20,stddev=2)
+	# volume = data.volume
+	# ema_short_volume, ema_long_volume = volume.ema(20).last, volume.ema(40).last
 	rsi = data.rsi(14).last
 
 	# on erronous data return early (indicators are of NoneType)
-	if rsi is None or ema_long is None or ema_short is None:
+	if rsi is None or ema_long is None or ema_short is None or bbands is None :
 		return
 
 	# has_high_volume = ema_short_volume[-1] > ema_long_volume[-1]
@@ -213,50 +209,48 @@ def handler(state, data):
 		return
 
 	elif state.trend is "downward":
-		if has_position:
-			close_and_log(position, data, state.trend)
+		if not has_position:
+			# strategy: detect pullback from bollinger band lower until the moving average
+			if (ema_short / ema_long) - 1 > 0.004 and rsi > 60 :
+				state.position_amount = buy_value/current_price
+				stop_loss = 0.03
+				order_with_sl(state.position_amount, stop_loss, current_price, state.trend)
+				state.first = True
+				portfolio = query_portfolio()
+				print(portfolio.open_positions, portfolio.closed_positions, portfolio.open_order_ids)
+		# else:
+		# 	if ((ema_long / ema_short) - 1 > 0.004 and rsi < 30) or current_price/bbands.bbands_lower.last < 0.965:
+		# 		close_and_log(position, data, state.trend)
+			# else:
+			# 	check_levels_close(close_prices, position, data, state)
 
 	elif state.trend is "upward":
 		if not state.first:
 			if not has_position and (ema_short / ema_long) > 1:
 				state.position_amount = buy_value/current_price
-				stop_loss = 0.05
-				buy(state.position_amount, stop_loss, current_price)
+				stop_loss = 0.03
+				order_with_sl(state.position_amount, stop_loss, current_price, state.trend)
 				state.first = True
-
-				state.position_active = True
-				state.position_buy_price = current_price
-				state.position_top_price = current_price
-				state.position_stop_loss = stop_loss
 		else:
 			if not has_position:
-				if (ema_short / ema_long) - 1 > 0.004  and rsi < 40 or \
-					(ema_short / ema_long) - 1 > 0.008:
+				if (ema_short / ema_long) - 1 > 0.008  and rsi > 60:
 					state.position_amount = buy_value/current_price
-					stop_loss = 0.06
-					buy(state.position_amount, stop_loss, current_price)
+					# stop_loss = current_price/bbands.bbands_lower.last*0.98 - 1
+					# if stop_loss < 0:
+					stop_loss = 0.03
+					order_with_sl(state.position_amount, stop_loss, current_price, state.trend)
+				# else:
+				# 	check_levels_buy(close_prices, current_price, state)
 
-					state.first = True
-					state.position_active = True
-					state.position_buy_price = current_price
-					state.position_top_price = current_price
-					state.position_stop_loss = stop_loss
-				else:
-					check_levels_buy(close_prices, current_price, state)
-			else:
-				if current_price/state.position_top_price > 1.03:
-					state.position_top_price = current_price
-					state.position_stop_loss = state.position_stop_loss
-				else:
-					if current_price/state.position_top_price  < 1-0.03 and \
-						ema_long / ema_short - 1 > 0.008  or \
-						current_price/state.position_top_price  < 1-0.06:
-						close_and_log(position, data, state.trend)
-					elif (ema_long / ema_short) - 1 > 0.004 and rsi > 60 or \
-					(ema_long / ema_short) - 1 > 0.02:
-						close_and_log(position, data, state.trend)
-					else:
-						check_levels_close(close_prices, position, data, state)
+			# else:
+			# 	if (ema_long / ema_short) - 1 > 0.02:
+			# 		close_and_log(position, data, state.trend)
+
+			# 	elif state.peak / current_price - 1 > 0.06:
+			# 		close_and_log(position, data, state.trend)
+			# 		state.peak = current_price
+				# else:
+				# 	check_levels_close(close_prices, position, data, state)
 
 
 
